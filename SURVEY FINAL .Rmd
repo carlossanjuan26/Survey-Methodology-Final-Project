@@ -1,0 +1,1654 @@
+---
+title: "Final Project Survey"
+author: "Clara Espinosa, Daniel Pérez y Carlos San Juan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    df_print: paged
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+The libraries we are going to use throughout the work are the following, please make sure you have all of them downloaded before continuing.
+
+```{r}
+library(haven)
+library(tidyverse)
+library(dplyr)
+library(car)
+library(readxl)
+library(sf)
+library(eurostat)
+library(ggplot2)
+library(patchwork)
+library(caret)
+library(ggeffects)
+library(randomForest)
+library(MASS)
+library(glmnet)
+library(gbm)
+library(pROC)
+library(rpart)
+library(rpart.plot)
+library(pdp)
+library(corrplot)
+library(corrr)
+library(gridExtra)
+library(mice)
+library(giscoR)
+library(countrycode)
+library(rworldmap)
+
+
+
+```
+
+The dataset we are going to use is the following: 
+
+```{r}
+ZA7575 <- read_dta("ZA7575.dta")
+```
+
+## Variable selection
+
+### From original dataset
+
+```{r}
+df <- ZA7575 |> 
+  dplyr::select(country, isocntry, d11, d70, qa5a:qa5t1, qa6_1:qa6_8, qa6_1:qa6_8, qa18a,qa11,
+         sd1_1:sd1_8, sd2_1:sd2_10, sd3, 
+         qc1_1:qc20, 
+         d1, d7, d10, d15a, d25, d43b, d60, d62_1:d62_4, d63, d72_1, d72_2, d77)
+
+# Germany appears in isocntry as DE-E and DE-W, so we will join them in DE
+
+df <- df |> 
+  mutate(isocntry = case_when(
+    isocntry == "DE-E" ~ "DE",
+    isocntry == "DE-W" ~ "DE",
+    TRUE ~ isocntry
+  ))
+```
+
+Age variables.
+
+```{r}
+# Rename age variable
+
+df <- df |> 
+  rename(age = d11)
+
+# Creating group variable for age (with labels and without labels)
+
+df <- df |> 
+  mutate(age_seq = cut(age, 
+                       breaks = c(0, 19, 29, 39, 49, 59, 103),
+                       labels = c("<20", "20-29", "30-39", "40-49", "50-59", ">=60")))
+
+df <- df |> 
+  mutate(
+  age_seq_pca = cut(age, breaks = c(0, 19, 29, 39, 49, 59, 103),
+                        labels = c("1", "2", "3", "4", "5", "6")),
+  age_seq_pca = as.numeric(age_seq_pca))
+```
+
+Life satisfaction.
+
+```{r}
+df <- df |> mutate(life_satisfaction = case_when(
+    d70 %in% c(1, 2) ~ 1,   # Satisfied
+    d70 %in% c(3, 4) ~ 0,   # Not satisfied
+    TRUE ~ NA_real_         # 5 es NA
+  ))
+```
+
+Questions about having friends who belong to certain social groups.
+
+```{r}
+# Different ethnic group
+df <- df |>
+  mutate(
+    frethnic = car::recode(sd1_1, "2=0; 3=NA; 4=NA")
+  )
+
+# Gay, lesbian, bisexual
+df <- df |>
+  mutate(
+    frlgtb = car::recode(sd1_4, "2=0; 3=NA; 4=NA")
+  )
+
+# Transgender
+df <- df |>
+  mutate(
+    frtrans = car::recode(sd1_7, "2=0; 3=NA; 4=NA")
+  )
+
+# Intersex
+df <- df |>
+  mutate(
+    frinter = car::recode(sd1_8, "2=0; 3=NA; 4=NA")
+  )
+```
+
+Respondent belongs to certain social group.
+
+```{r}
+# Ethnic group or LGTB
+df <- df |> 
+  mutate(
+    minority_ethnic = sd2_1,
+    minority_lgtb = sd2_5)
+```
+
+Religion: is the respondant believer or non believer?
+
+```{r}
+df <- df |> 
+  mutate(
+    belief = case_when(
+      sd3 %in% 1:11  ~ 1,  # Believer
+      sd3 %in% 12:13 ~ 0,  # Non believer
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+Opinion about discrimination, is it widespread or rare?.
+
+```{r}
+df <- df |> 
+  mutate(
+    sexorient_discrimination = case_when(
+      qc1_4 == 1 | qc1_4 == 2 ~ 1,  # Widespread
+      qc1_4 == 3 | qc1_4 == 4 ~ 0,  # Rare 
+      qc1_4 == 5 | qc1_4 == 6 ~ NA_real_,  
+      TRUE ~ NA_real_
+    )
+  )
+
+df <- df |> 
+  mutate(
+    trans_discrimination = case_when(
+      qc1_8 == 1 | qc1_8 == 2 ~ 1,  # Widespread
+      qc1_8 == 3 | qc1_8 == 4 ~ 0,  # Rare 
+      qc1_8 == 5 | qc1_8 == 6 ~ NA_real_,  
+      TRUE ~ NA_real_
+    )
+  )
+```
+
+Comfortable or not comfortable with a trans politician
+
+```{r}
+df <- df |> 
+  mutate(
+    trans_politician = ifelse(qc6_1 >= 1 & qc6_1 <= 5, 0,
+                              ifelse(qc6_1 >= 6 & qc6_1 <= 10, 1, NA_real_))
+  )
+```
+
+Acceptance of certain policies regarding the LGBT community and its rights.
+
+```{r}
+# Opinion about homosexual marriage
+df <- df |> 
+  mutate(
+    samesex_marriage_allowed = case_when(
+      qc15_3 == 1 | qc15_3 == 2 ~ 1,  # Agree
+      qc15_3 == 3 | qc15_3 == 4 ~ 0,  # Disagree 
+      qc15_3 == 5 | qc15_3 == 6 ~ NA_real_,  
+      TRUE ~ NA_real_
+    )
+  )
+
+# Opinion about transgender persons being able to change their civil documents
+df <- df |> 
+  mutate(trans_document_change = ifelse(qc19 == 1, 1, 0))
+
+```
+
+Marital status.
+
+```{r}
+df <- df |> 
+  mutate(marital_status = case_when(
+    between(d7, 1, 4) ~ 1, # 1 = married or remarried
+    between(d7, 5, 8) ~ 2, #2 = single living with a partner
+    between(d7, 9, 10) ~ 3, #3 = single
+    between(d7, 11, 12) ~ 4, #4=divorced
+    between(d7, 13, 14) ~ 5, #5 = widow, 
+    TRUE ~ NA_integer_ ),
+    marital_status = factor(
+      marital_status,
+      levels = c(1, 2, 3, 4, 5),
+      labels = c("Married or remarried", 
+                 "Single living with a partner", 
+                 "Single", 
+                 "Divorced", 
+                 "Widow")
+    ))
+```
+
+Gender.
+
+```{r}
+df <- df |> 
+  mutate(gender = ifelse(d10 == 2, 0, d10)) # 1 man, 0 women
+```
+
+Occupation.
+
+```{r}
+df <- df |> 
+  mutate(occupation_status = case_when(
+    between(d15a, 1, 4) ~ 1, # 1 = non active
+    between(d15a, 5, 9) ~ 2, # 2 = self employed
+    between(d15a, 10, 18) ~ 3, # 3 = employed
+    TRUE ~ NA_integer_ ),
+    occupation_status = factor(
+      occupation_status,
+      levels = c(1, 2, 3),
+      labels = c("Non active", "Self employed", "Employed")
+    ))
+```
+
+Area of living.
+
+```{r}
+df <- df |> 
+  mutate(
+    area_living = case_when(
+      d25 == 1 ~ "Rural area or village",
+      d25 == 2 ~ "Small or middle sized town",
+      d25 == 3 ~ "Large town",
+      TRUE ~ as.character(NA)  # Convierte el valor 4 (y cualquier otro valor) en NA
+    )
+  ) |> 
+  mutate(
+    area_living = factor(area_living)
+  )
+```
+
+Struggling with bills.
+
+```{r}
+df <- df |> 
+  mutate(struggle_bills = factor(
+    case_when(
+      d60 == 4 ~ NA_character_,  # Use NA_character_ to ensure factor compatibility
+      TRUE ~ as.character(d60)  # Convert to character to ensure factor compatibility
+    ),
+    levels = c("1", "2", "3"),  # Define the levels of the factor (excluding 4)
+    labels = c("Most of the time", "From time to time", "Almost never/never")  # Assign labels to the factor levels
+  ))
+```
+
+Use of internet at home.
+
+```{r}
+df <- df |> 
+  mutate(internet_home = case_when(
+    d62_1 >= 1 & d62_1 <= 3 ~ "weekly use",
+    d62_1 >= 4 & d62_1 <= 5 ~ "monthly/infrequent use",
+    d62_1 >= 6 & d62_1 <= 7 ~ "never/no access",
+    TRUE ~ NA_character_ # Note the change to NA_character_ for factor compatibility
+  )) |>
+  mutate(internet_home = factor(internet_home))
+```
+
+Autodefinition of social class.
+
+```{r}
+df <- df |> 
+  mutate(social_class = case_when(
+    between(d63, 1, 2) ~ "Low Class",
+    d63 == 3 ~ "Middle Class",
+    between(d63, 4, 5) ~ "High Class",
+    d63 %in% c(6, 7, 8, 9) ~ NA_character_,
+    TRUE ~ as.character(d63)
+  )) |> 
+  mutate(social_class = factor(social_class))
+```
+
+Selection of final variables:
+
+```{r}
+df_clean <- df |> 
+  dplyr::select(isocntry, 
+         age, age_seq, age_seq_pca, 
+         life_satisfaction,
+         frethnic, frlgtb, frtrans, frinter,
+         minority_ethnic, minority_lgtb,
+         belief,
+         sexorient_discrimination, trans_discrimination,
+         trans_politician,
+         samesex_marriage_allowed, trans_document_change,
+         marital_status, gender, occupation_status, area_living,
+         struggle_bills, internet_home, social_class)
+```
+
+### From external sources
+
+Variable for the political sign in the government:
+
+```{r, warning = FALSE}
+politicaldata <- read_excel("politicaldata.xlsx")
+
+politicaldata <- politicaldata |> 
+  filter(year==2019) |> 
+  mutate(isocntry = case_when(
+    country == "Austria" ~ "AT",
+    country == "Belgium" ~ "BE",
+    country == "Bulgaria" ~ "BG",
+    country == "Croatia" ~ "HR",
+    country == "Cyprus" ~ "CY",
+    country == "Czech Republic" ~ "CZ",
+    country == "Denmark" ~ "DK",
+    country == "Estonia" ~ "EE",
+    country == "Finland" ~ "FI",
+    country == "France" ~ "FR",
+    country == "Germany" ~ "DE",
+    country == "Greece" ~ "GR",
+    country == "Hungary" ~ "HU",
+    country == "Ireland" ~ "IE",
+    country == "Italy" ~ "IT",
+    country == "Latvia" ~ "LV",
+    country == "Lithuania" ~ "LT",
+    country == "Luxembourg" ~ "LU",
+    country == "Malta" ~ "MT",
+    country == "Netherlands" ~ "NL",
+    country == "Poland" ~ "PL",
+    country == "Portugal" ~ "PT",
+    country == "Romania" ~ "RO",
+    country == "Slovakia" ~ "SK",
+    country == "Slovenia" ~ "SI",
+    country == "Spain" ~ "ES",
+    country == "Sweden" ~ "SE",
+    country == "United Kingdom" ~ "GB",
+    TRUE ~ NA_character_
+  )) |> 
+  filter(!is.na(isocntry)) |> 
+  dplyr::select(isocntry, gov_right1, gov_cent1, gov_left1)
+
+df_clean <- left_join(df_clean, politicaldata, by = "isocntry")
+```
+
+Variable of the protection of transgender people in country:
+
+```{r, warning = FALSE}
+tgeu <- read_csv("tgeu-trans-rights-map-2022-eu-(european-union)-en.csv") |> 
+  mutate(across(-c(1, 2), ~ if_else(. == "X", 1L, 0L, 0L))) |> 
+  mutate(across(where(is.character), ~ replace_na(., "0"))) |> 
+  rename(countryname = ...1) |> 
+  dplyr::select(!c("LGR cluster", "...30"))
+
+
+#tgeu <- tgeu |> 
+  tgeu <- dplyr::slice(tgeu, 1:(nrow(tgeu) - 3))
+  #slice(1:(n() - 3))
+
+tgeu <- tgeu %>%
+  mutate(protection_trans = rowSums(dplyr::select(., -1), na.rm = TRUE) / 27)
+
+# Adding data for the UK
+uk <- read_csv("tgeu-trans-rights-map-2022-united-kingdom-en.csv")  %>%
+  mutate(across(-c(1, 2), ~ if_else(. == "X", 1L, 0L, 0L))) %>%
+  mutate(across(where(is.character), ~ replace_na(., "0"))) |> 
+  rename(countryname = ...1) |> 
+  dplyr::select(!c("LGR cluster", "...30"))
+
+uk <- uk |> 
+  slice(1:(n() - 3))
+
+uk <- uk %>%
+  mutate(protection_trans = rowSums(dplyr::select(., -1), na.rm = TRUE) / 27)
+
+# Adding UK to the daataset
+tgeu <- rbind(tgeu, uk)
+
+tgeu <- tgeu %>%
+  mutate(isocntry = case_when(
+    countryname == "Austria" ~ "AT",
+    countryname == "Belgium" ~ "BE",
+    countryname == "Bulgaria" ~ "BG",
+    countryname == "Croatia" ~ "HR",
+    countryname == "Cyprus" ~ "CY",
+    countryname == "Czech Republic" ~ "CZ",
+    countryname == "Denmark" ~ "DK",
+    countryname == "Estonia" ~ "EE",
+    countryname == "Finland" ~ "FI",
+    countryname == "France" ~ "FR",
+    countryname == "Germany" ~ "DE",
+    countryname == "Greece" ~ "GR",
+    countryname == "Hungary" ~ "HU",
+    countryname == "Ireland" ~ "IE",
+    countryname == "Italy" ~ "IT",
+    countryname == "Latvia" ~ "LV",
+    countryname == "Lithuania" ~ "LT",
+    countryname == "Luxembourg" ~ "LU",
+    countryname == "Malta" ~ "MT",
+    countryname == "Netherlands" ~ "NL",
+    countryname == "Poland" ~ "PL",
+    countryname == "Portugal" ~ "PT",
+    countryname == "Romania" ~ "RO",
+    countryname == "Slovakia" ~ "SK",
+    countryname == "Slovenia" ~ "SI",
+    countryname == "Spain" ~ "ES",
+    countryname == "Sweden" ~ "SE",
+    countryname == "United Kingdom" ~ "GB",
+    TRUE ~ NA_character_
+  )) |> 
+  dplyr::select(protection_trans, isocntry)
+
+df_clean <- left_join(df_clean, tgeu, by= "isocntry")
+```
+
+Economic and demographic variables.
+
+```{r, warning = FALSE}
+indicators <- read_csv("indicators.csv")
+
+indicators <- indicators |> 
+  rename_with(~ 'countryname', .cols = 1) |> 
+  rename_with(~ 'iso3c', .cols = 2) |> 
+  rename_with(~ 'life_expectancy', .cols = 3) |> 
+  rename_with(~ 'gdp_percapita', .cols = 4) |>  
+  rename_with(~ 'population_density', .cols = 5) |> 
+  rename_with(~ 'rural_population', .cols = 6) |> 
+  rename_with(~ 'fertility_rate', .cols = 7) |> 
+  mutate(isocntry = case_when(
+    countryname == "Austria" ~ "AT",
+    countryname == "Belgium" ~ "BE",
+    countryname == "Bulgaria" ~ "BG",
+    countryname == "Croatia" ~ "HR",
+    countryname == "Cyprus" ~ "CY",
+    countryname == "Czechia" ~ "CZ",
+    countryname == "Denmark" ~ "DK",
+    countryname == "Estonia" ~ "EE",
+    countryname == "Finland" ~ "FI",
+    countryname == "France" ~ "FR",
+    countryname == "Germany" ~ "DE",
+    countryname == "Greece" ~ "GR",
+    countryname == "Hungary" ~ "HU",
+    countryname == "Ireland" ~ "IE",
+    countryname == "Italy" ~ "IT",
+    countryname == "Latvia" ~ "LV",
+    countryname == "Lithuania" ~ "LT",
+    countryname == "Luxembourg" ~ "LU",
+    countryname == "Malta" ~ "MT",
+    countryname == "Netherlands" ~ "NL",
+    countryname == "Poland" ~ "PL",
+    countryname == "Portugal" ~ "PT",
+    countryname == "Romania" ~ "RO",
+    countryname == "Slovak Republic" ~ "SK",
+    countryname == "Slovenia" ~ "SI",
+    countryname == "Spain" ~ "ES",
+    countryname == "Sweden" ~ "SE",
+    countryname == "United Kingdom" ~ "GB",
+    TRUE ~ NA_character_
+  )) |> 
+  drop_na() |> dplyr::select(-iso3c)
+  
+df_clean <- left_join(df_clean, indicators, by= "isocntry")
+```
+
+Also, we will calculate de proportion of people that are in favor of transgender people being able to change their civil documents:
+
+```{r, warning = FALSE}
+country_proportions <- df_clean |> 
+  group_by(isocntry) |> 
+  summarise(ProportionYes = mean(trans_document_change, na.rm = TRUE)) |> 
+  ungroup() 
+
+df_clean <- df_clean |> 
+  left_join(country_proportions, by = "isocntry")
+```
+
+## Descriptive analysis
+
+First, let's prepare our dataset for descriptive analysis.
+
+We will separate the variables in three to make the visualization more approachable.
+
+In first place we are going to provide information about on what will be our dependent variable
+
+```{r, fig.height=6, fig.width=6}
+df_descriptive <- df_clean |> 
+  mutate(trans_document_change = factor(trans_document_change,
+                                        levels = c(0, 1),
+                                        labels = c("Doesn't support", "Supports")))
+
+
+summary(df_descriptive$trans_document_change)
+
+total_responses <- nrow(df_descriptive)
+
+target_visualization <- ggplot(data = df_descriptive, aes(x = trans_document_change)) +
+  geom_bar(aes(y = (..count..)/total_responses), fill = "#3D619B", color = "#000126") +
+  scale_y_continuous(labels = scales::percent_format()) +
+  theme_minimal() +
+  labs(
+    title = "Opinions on Changing Documents\n for Transgender Individuals",
+    x = "Opinion",
+    y = "Percentage of Responses"
+  ) +
+  theme(
+    plot.title = element_text(size = 14, face = "bold", hjust = 0.5),
+    plot.caption = element_text(size = 10, hjust = 0.5),
+    axis.title = element_text(size = 12),
+    axis.text.x = element_text(hjust = 0.5, size = 10),  
+    axis.text.y = element_text(size = 10),
+    legend.position = "none"
+  )
+
+#ggsave("target_visualization.png", target_visualization, width = 6, height = 6)
+target_visualization
+prop_target <- prop.table(table(df_descriptive$trans_document_change))
+```
+
+As we can see, the distribution of those in favour and against the change of document for transgender people is practically balanced.
+
+Next, we will analyse the correlation with individual sociodemographic variables:
+
+```{r}
+df_clean_sociodem <- df_clean |> dplyr::select(trans_document_change, age, marital_status, gender, occupation_status, area_living, struggle_bills, internet_home, social_class) |> drop_na()
+
+df_dummies_sociodem <- dummyVars(" ~ .", data = df_clean_sociodem)
+df_transformed_sociodem <- predict(df_dummies_sociodem, newdata = df_clean_sociodem)
+
+# Paso 2: Calcular la matriz de correlación y extraer correlaciones para 'target'
+cor_matrix_sociodem <- cor(df_transformed_sociodem, use = "pairwise.complete.obs")
+target_correlations_sociodem <- cor_matrix_sociodem[, "trans_document_change"]  # Asume que 'target' también está en df_transformed
+
+# Convertir en un dataframe para el heatmap
+cor_df_sociodem <- data.frame(Variable = names(target_correlations_sociodem), Correlation = target_correlations_sociodem)
+cor_df_sociodem <- cor_df_sociodem[order(cor_df_sociodem$Correlation, decreasing = TRUE), ]  # Ordenar por correlación
+
+# Paso 3: Crear un heatmap
+ggplot(cor_df_sociodem, aes(x = "", y = reorder(Variable, Correlation), fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "#3D619B",
+    high = "#EF4B4C",
+    mid = "white",
+    midpoint = 0,             
+    name = "Correlation",
+    limits = c(-1, 1)         
+  ) +
+  labs(y = "Variable", fill = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.x=element_blank())
+```
+
+Now, let's see the relation with "opinion" variables
+
+```{r}
+df_clean_opinion <- df_clean |> dplyr::select(trans_document_change, life_satisfaction, frethnic, frlgtb, frtrans, frinter, minority_ethnic, minority_lgtb, belief, sexorient_discrimination, trans_discrimination, trans_politician, samesex_marriage_allowed) |> drop_na()
+
+df_dummies_opinion <- dummyVars(" ~ .", data = df_clean_opinion)
+df_transformed_opinion <- predict(df_dummies_opinion, newdata = df_clean_opinion)
+
+# Paso 2: Calcular la matriz de correlación y extraer correlaciones para 'target'
+cor_matrix_opinion <- cor(df_transformed_opinion, use = "pairwise.complete.obs")
+target_correlations_opinion <- cor_matrix_opinion[, "trans_document_change"]  # Asume que 'target' también está en df_transformed
+
+# Convertir en un dataframe para el heatmap
+cor_df_opinion <- data.frame(Variable = names(target_correlations_opinion), Correlation = target_correlations_opinion)
+cor_df_opinion <- cor_df_opinion[order(cor_df_opinion$Correlation, decreasing = TRUE), ]  # Ordenar por correlación
+
+# Paso 3: Crear un heatmap
+ggplot(cor_df_opinion, aes(x = "", y = reorder(Variable, Correlation), fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "#3D619B",
+    high = "#EF4B4C",
+    mid = "white",
+    midpoint = 0,             
+    name = "Correlation",
+    limits = c(-1, 1)         
+  ) +
+  labs(y = "Variable", fill = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.x=element_blank())
+```
+
+Lastly, let's see the relation with country-level variables:
+
+```{r}
+df_clean_country <- df_clean |> dplyr::select(trans_document_change, gov_right1, gov_cent1, gov_left1, protection_trans, life_expectancy, gdp_percapita, population_density, rural_population, fertility_rate)
+
+df_dummies_country <- dummyVars(" ~ .", data = df_clean_country)
+df_transformed_country <- predict(df_dummies_country, newdata = df_clean_country)
+
+# Paso 2: Calcular la matriz de correlación y extraer correlaciones para 'target'
+cor_matrix_country <- cor(df_transformed_country, use = "pairwise.complete.obs")
+target_correlations_country <- cor_matrix_country[, "trans_document_change"]  # Asume que 'target' también está en df_transformed
+
+# Convertir en un dataframe para el heatmap
+cor_df_country <- data.frame(Variable = names(target_correlations_country), Correlation = target_correlations_country)
+cor_df_country <- cor_df_country[order(cor_df_country$Correlation, decreasing = TRUE), ]  # Ordenar por correlación
+
+# Paso 3: Crear un heatmap
+ggplot(cor_df_country, aes(x = "", y = reorder(Variable, Correlation), fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "#3D619B",
+    high = "#EF4B4C",
+    mid = "white",
+    midpoint = 0,             
+    name = "Correlation",
+    limits = c(-1, 1)         
+  ) +
+  labs(y = "Variable", fill = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.x=element_blank())
+```
+
+Lastly, let's see how creating dummies for the countries affect correlation:
+
+```{r}
+df_clean_isocntry <- df_clean |> dplyr::select(trans_document_change, isocntry)
+
+df_dummies_isocntry <- dummyVars(" ~ .", data = df_clean_isocntry)
+df_transformed_isocntry <- predict(df_dummies_isocntry, newdata = df_clean_isocntry)
+
+# Paso 2: Calcular la matriz de correlación y extraer correlaciones para 'target'
+cor_matrix_isocntry <- cor(df_transformed_isocntry, use = "pairwise.complete.obs")
+target_correlations_isocntry <- cor_matrix_isocntry[, "trans_document_change"]  # Asume que 'target' también está en df_transformed
+
+# Convertir en un dataframe para el heatmap
+cor_df_isocntry <- data.frame(Variable = names(target_correlations_isocntry), Correlation = target_correlations_isocntry)
+cor_df_isocntry <- cor_df_isocntry[order(cor_df_isocntry$Correlation, decreasing = TRUE), ]  # Ordenar por correlación
+
+# Paso 3: Crear un heatmap
+ggplot(cor_df_isocntry, aes(x = "", y = reorder(Variable, Correlation), fill = Correlation)) +
+  geom_tile() +
+  scale_fill_gradient2(
+    low = "#3D619B",
+    high = "#EF4B4C",
+    mid = "white",
+    midpoint = 0,             
+    name = "Correlation",
+    limits = c(-1, 1)         
+  ) +
+  labs(y = "Variable", fill = "Correlation") +
+  theme_minimal() +
+  theme(axis.text.x=element_blank(),
+        axis.ticks.x=element_blank(),
+        axis.title.x=element_blank())
+```
+
+Proportion of respondents who support that transgender people can change their identity in their documents.
+
+```{r, fig.width=12, fig.width=12}
+ library(giscoR)
+# First, we calculate the mean for each country
+country_proportions <- df_clean |> 
+  group_by(isocntry) |> 
+  summarise(ProportionYes = mean(trans_document_change, na.rm = TRUE)) |> 
+  ungroup() 
+
+# We get the spatial information to map Europe
+SHP_0 <- get_eurostat_geospatial(resolution = 10, 
+                                 nuts_level = 0, 
+                                 year = 2016)
+
+SHP_0_3035 <- st_transform(SHP_0, crs = 3035)
+
+SHP_0_3035  |> 
+  ggplot() +
+  geom_sf() +
+  scale_x_continuous(limits = c(2800000, 7150000)) +
+  scale_y_continuous(limits = c(1380000, 5300000)) 
+
+countryprop_shp0 <- country_proportions |> 
+  dplyr::select(isocntry, ProportionYes) |> 
+  mutate(isocntry = case_when(
+    isocntry == "GB" ~ "UK",
+    isocntry == "GR" ~ "EL",
+    TRUE ~ isocntry
+  )) |>
+  rename("geo" = "isocntry") |> 
+  inner_join(SHP_0_3035, by = "geo") |> 
+  st_as_sf()
+
+prop_country <- countryprop_shp0 |> 
+  ggplot(aes(fill = ProportionYes)) +
+  geom_sf() +
+   scale_x_continuous(limits = c(2500000, 7000000)) +
+  scale_y_continuous(limits = c(1600000, 5200000)) +
+  scale_fill_gradient(low = "#EF4B4C", high = "#3D619B", na.value = "white", name = "Proportion in favour", limits = c(0,1)) +
+  labs(
+    title = "Support for Trans Individuals to Change Documents",
+    caption = "Source: Eurobarometer 2019 Survey"
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12),
+    plot.title = element_text(size = 17, face = "bold", hjust = 0.5),
+    plot.caption = element_text(size = 12, hjust = 0.5)
+  ) +
+  guides(
+    fill = guide_colourbar(barwidth = 10, barheight = 0.5, title.position = 'top', title.hjust = 0.5)
+  )
+
+prop_country
+```
+
+Protection of transgender people taking into account the political and legal situation of the country.
+
+```{r, fig.width=12, fig.height=12}
+protection_shp0 <- df_clean |> 
+  dplyr::select(isocntry, protection_trans) |> 
+   mutate(isocntry = case_when(
+    isocntry == "GB" ~ "UK",
+    isocntry == "GR" ~ "EL",
+    TRUE ~ isocntry
+  )) |> 
+  rename("geo" = "isocntry") |> 
+  inner_join(SHP_0_3035, by = "geo") |> 
+  st_as_sf()
+ 
+protection_country <- protection_shp0 |> 
+  ggplot(aes(fill = protection_trans)) +
+  geom_sf() +
+   scale_x_continuous(limits = c(2500000, 7000000)) +
+  scale_y_continuous(limits = c(1600000, 5200000)) +
+  scale_fill_gradient(low = "#EF4B4C", high = "#3D619B", na.value = "white", name = "Index", limits = c(0,1)) +
+  labs(
+    title = "Protection of Trans People",
+    caption = "Source: TGEU Trans Rights Map"
+  ) +
+  theme_void() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 12),
+    plot.title = element_text(size = 17, face = "bold", hjust = 0.5),
+    plot.caption = element_text(size = 12, hjust = 0.5)
+  ) +
+  guides(
+    fill = guide_colourbar(barwidth = 10, barheight = 0.5, title.position = 'top', title.hjust = 0.5)
+  )
+
+protection_country
+```
+
+Let's see both plots one next to the other.
+
+```{r, fig.width=24, fig.height=12}
+combined <- (prop_country | protection_country) + theme(legend.position = 'bottom')
+
+combined <- combined & theme(legend.position = 'bottom',
+  legend.direction = 'horizontal',
+  legend.title = element_blank(),
+    legend.text = element_text(size = 12)) &
+   guides(
+    fill = guide_colourbar(barwidth = 10, barheight = 0.5, title.position = 'top', title.hjust = 0.5)
+  )
+#ggsave("combined_maps.png", combined, width = 24, height = 12)
+combined
+```
+
+Both the economic situation (measured with `gdp_percapita`) and the proportion of right-wing members of the government have a strong relation with the proportion of people that are in favour of transgender people having the chance of changing civil documents.
+
+```{r, fig.width=7, fig.height=5}
+# Let's stablish the countries with right wing government (those with more than 50% of the cabinet)
+
+df_clean <- df_clean |> 
+  mutate(right_yes = case_when(
+    gov_right1 > 50 ~ 1,
+    TRUE ~ 0
+  ))
+
+gdp_gov_prop <- ggplot(na.omit(df_clean), aes(x = ProportionYes, y = gdp_percapita, color = gov_right1 / 100)) +  # Asumiendo que gov_right1 es un porcentaje entero
+  geom_point() +
+  scale_color_gradient(low = "#8FB1BE", high = "#000126", name = "% Right-Wing\nin Government") +
+  labs(
+    title = "Relation between People's Attitude Regarding Transgender Issues,\nEconomic, and Political Situation",
+    x = "Proportion of People in Favour",
+    y = "GDP per capita"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.title = element_text(size = 9),  
+    legend.text = element_text(size = 7),    
+    text = element_text(size = 9),
+    plot.title = element_text(size = 12, hjust = 0.5, face = "bold"),
+    axis.title = element_text(size = 10)
+  )  
+gdp_gov_prop
+#ggsave("gdp_gov_prop.png", gdp_gov_prop, width = 7, height = 4)
+```
+
+
+On an individual level
+
+```{r}
+age_groups <- df_clean |> 
+  group_by(age) |> 
+  summarise(ProportionSupport = mean(trans_document_change, na.rm = TRUE)) |> 
+  ungroup()
+
+df_clean_plot <- df_clean |> 
+  left_join(age_groups, by = "age")
+
+ggplot(df_clean_plot, aes(x = age, y = 1, fill = ProportionSupport)) +
+  geom_tile() +
+  scale_fill_gradient2(low = "#EF4B4C", high = "#3D619B", mid = "white", midpoint = 0.5, 
+                       name = "Support Proportion", limits = c(0, 1)) +
+  labs(
+    title = "Proportion of Support for Trans Policy Measures by Age Group",
+    x = "Age",
+    y = ""
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 8),
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+    plot.caption = element_text(size = 10, hjust = 0.5),
+    axis.text.y = element_blank(),
+    axis.ticks.y = element_blank(),
+    axis.title.y = element_blank()
+  ) +
+  guides(
+    fill = guide_colourbar(barwidth = 9, barheight = 0.5, title.position = 'top', title.hjust = 0.5)
+  ) +
+  coord_fixed(ratio = 20)
+```
+
+```{r, fig.width=8, fig.height=6}
+age_gender_support <- df_clean |> 
+  group_by(age_seq, gender, social_class) |> 
+  summarise(ProportionSupport = mean(trans_document_change, na.rm = TRUE)) |>
+  ungroup()
+
+age_gender_support$age_seq <- factor(age_gender_support$age_seq, levels = unique(age_gender_support$age_seq))
+
+age_gender_support <- age_gender_support |> 
+  mutate(gender = factor(gender, levels = c(0, 1), labels = c("Female", "Male")))
+
+age_gender_support <- age_gender_support |> 
+  mutate(social_class = factor(social_class, levels = c("Low Class", "Middle Class", "High Class")))
+
+age_gender <- ggplot(drop_na(age_gender_support), aes(x = age_seq, y = ProportionSupport, group = gender, color = gender)) +
+  geom_line() +
+  geom_point() +
+  scale_color_manual(values = c("Female" = "#FCC560", "Male" = "#A0CBAD")) +
+  facet_wrap(~ social_class, scales = "fixed") +  # Usa escalas fijas para todas las facetas
+  labs(
+    title = "Proportion of Support by Age, Gender, and Social Class",
+    x = "Age Group",
+    y = "Proportion of Support",
+    color = "Gender"
+  ) +
+  theme_minimal() +
+  theme(
+    legend.position = "bottom",
+    legend.direction = "horizontal",
+    legend.title = element_blank(),
+    legend.text = element_text(size = 8),
+    plot.title = element_text(size = 12, face = "bold", hjust = 0.5),
+    plot.caption = element_text(size = 10, hjust = 0.5),
+    strip.text.x = element_text(size = 10),
+    axis.text.x = element_text(angle = 45, hjust = 1)
+  )
+ggsave("age_gender.png", age_gender, width = 7, height = 4)
+age_gender
+```
+
+## NA´S IMPUTATION
+
+Once the descriptive analysis of the main variables has been performed, the next crucial step is the imputation of missing values (NA's). This process is fundamental because it maximises the use of the available data, improving the accuracy of subsequent statistical analyses and predictive models. NA imputation helps to avoid biases that can arise from excluding complete rows with missing values, which is especially relevant in datasets with a significant amount of incomplete information. Furthermore, by estimating missing values in a reasonable way, the structural integrity of the dataset is preserved, allowing for more robust and reliable analyses.
+
+```{r, warning = FALSE}
+set.seed(123)
+percentage_missing <- colMeans(is.na(df_clean)) * 100
+
+print(percentage_missing)
+```
+
+In general, our database does not have many problems related to missing values, since many variables do not have NA's.
+
+However, the variable trans_discrimination is an exception and has 19% of NA's. This variable has been transformed to a binary variable (1, 0) where 1 = discrimination against trans people is common and 0 = it is not. This variable has been transformed into a binary variable (1, 0) where 1 = discrimination against trans people is common and 0 = it is not.
+
+First, let's see if Na's belong to a specific country.
+
+```{r, warning = FALSE}
+set.seed(123)
+# Filter the dataframe only for observations with missing values in the variable of interest.
+df_na <- df_clean[is.na(df_clean$trans_discrimination), ]
+
+# Count the total number of observations per country
+total_observations <- table(df_clean$countryname)
+
+# Count the number of NAs per country
+na_counts <- table(df_na$countryname)
+
+# Create a dataframe with the counts
+na_df <- data.frame(countryname = names(na_counts), NA_count = as.vector(na_counts))
+
+# Calculate the percentage of NA out of the total observations per country
+na_df$NA_percentage <- na_df$NA_count / total_observations[na_df$countryname] * 100
+
+# Sort countries by percentage of NA in descending order
+na_df <- na_df[order(-na_df$NA_percentage), ]
+
+# Create the stacked bar chart
+ggplot(na_df, aes(x = reorder(countryname, -NA_percentage), y = NA_percentage, fill = countryname)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Porcentaje de valores faltantes por país",
+       x = "País",
+       y = "Porcentaje de NA sobre el total de observaciones (%)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+
+```
+
+We see that in Estonia, Bulgaria and Latvia the percentage of Na's in the trans_protection variable is between (35-40)%. Therefore, to impute we will take into account the histogram at the global level, but also the histogram of these regions separately to see if the imputation is being correct in those countries where Na's are more present.
+
+NOTA: Como hay varias variables que imputaremos, realizamos la imputación completa y luego iremos comprobando la distribución de cada variable.
+
+Because there are numerous variables which require imputation, we will first perform a full imputation, and then check variable by variable the distribution and the model that best represents the original dataset.
+
+```{r, warning = FALSE}
+set.seed(123)
+df_clean <- zap_labels(df_clean)
+imputed_normboot <- complete(mice(df_clean, m=1, method = "norm.boot", seed=123))
+imputed_pmm <- complete(mice(df_clean, m=1, method = "pmm", seed=123))
+imputed_rf <- complete(mice(df_clean, m=1, method = "rf", seed=123))
+```
+Once the variables have been imputed, let's look at their distributions to see which one fits best:
+
+```{r}
+# Bar chart for binary variable trans_protection
+x1 <- ggplot(df_clean, aes(x = as.factor(trans_discrimination))) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "original",
+       x = "trans_discrimination",
+       y = "Frecuencia")
+
+x2 <- ggplot(imputed_pmm, aes(x = as.factor(trans_discrimination))) +
+  geom_bar(fill = "red", color = "black") +
+  labs(title = "Imputed_pmm",
+       x = "trans_discrimination",
+       y = "Frequency")
+
+
+x3 <- ggplot(imputed_rf, aes(x = as.factor(trans_discrimination))) +
+  geom_bar(fill = "green", color = "black") +
+  labs(title = "Imputed_rf",
+       x = "trans_discrimination",
+       y = "Frequency")
+
+
+# Combine graphics in a single graphic window
+grid.arrange(x1, x2, x3, nrow = 1)
+```
+
+As we can see, the barplot of the original variable shows that the percentage of people who think that discrimination against transgender people is common in their country (trans_discrimination = 1) is slightly higher than those who think that it is not common (trans_discrimination = 0). We can see that when we perform imputation, except when we impute the mode (which does not make sense in a variable whose distribution is so even) the rest of the methods register a higher number of 0s than 1s.
+
+One possible explanation for this event is found in the fact that the percentage of NA's in the variable varies greatly between countries. When missing values are imputed in these countries with a majority of 0 values, the imputation will tend to follow that trend to maintain the relative proportion of 0 and 1 values within each country. As a result, the imputation will generate more 0 values than 1 values in these countries with a high proportion of missing values.
+
+Given that these countries contribute a large number of observations to the aggregated dataset, the preponderance of imputed 0 values in these countries significantly influences the overall distribution of 0 and 1 values across the dataset.
+
+Turning to the second chart, we can verify the facts, as it is clearly seen how the number of people who think that cases of discrimination against trans people are not common (0) is much higher than the number of 1s.
+
+Let's now look at sexorient_discrimination, which has 9% of NA's. To represent it, we will use the same code used previously.
+
+```{r, warning = FALSE}
+df_na <- df_clean[is.na(df_clean$sexorient_discrimination), ]
+total_observations <- table(df_clean$countryname)
+na_counts <- table(df_na$countryname)
+na_df <- data.frame(countryname = names(na_counts), NA_count = as.vector(na_counts))
+na_df$NA_percentage <- na_df$NA_count / total_observations[na_df$countryname] * 100
+na_df <- na_df[order(-na_df$NA_percentage), ]
+ggplot(na_df, aes(x = reorder(countryname, -NA_percentage), y = NA_percentage, fill = countryname)) +
+  geom_bar(stat = "identity") +
+  labs(title = "Porcentaje de valores faltantes por país",
+       x = "País",
+       y = "Porcentaje de NA sobre el total de observaciones (%)") +
+  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust = 1))
+
+```
+
+Again, we observe that the countries with the highest number of NA's are Latvia, Estonia, and Bulgaria. Therefore, it is expected that the results obtained with the imputation will be the same as with trans_discrimination.
+
+```{r, warning = FALSE}
+set.seed(123)
+x4 <- ggplot(df_clean, aes(x = as.factor(sexorient_discrimination))) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "original",
+       x = "Sex Orientation Discrim",
+       y = "Frecuencia")
+
+x5 <- ggplot(imputed_pmm, aes(x = as.factor(sexorient_discrimination))) +
+  geom_bar(fill = "red", color = "black") +
+  labs(title = "Imputed_pmm",
+       x = "Sex Orientation Discrim",
+       y = "Frequency")
+
+
+x6 <- ggplot(imputed_rf, aes(x = as.factor(sexorient_discrimination))) +
+  geom_bar(fill = "green", color = "black") +
+  labs(title = "Imputed_rf",
+       x = "Sex Orientation Discrim",
+       y = "Frequency")
+
+grid.arrange(x4, x5, x6, nrow = 1)
+
+```
+
+Indeed, we observe the same as in the trans_discrimination variable. In this case, the percentage of 1 remains above, but we see that the differences have been reduced with respect to the original variable. Again due to the predominance of 0 in the countries mentioned (countries that a priori are less supportive of lgtbi causes).
+
+Let us now look at our social_class variable, to see how the imputation behaves with a variable with 3 categories, since the rest of the variables with na's are binary and the nature of the question in question in the survey is quite similar.
+
+```{r, warning = FALSE}
+set.seed(123)
+library(gridExtra)
+
+# Graficos
+x7 <- ggplot(df_clean, aes(x = as.factor(social_class))) +
+  geom_bar(fill = "skyblue", color = "black") +
+  labs(title = "Original",
+       x = "Social class",
+       y = "Frequency") +
+  theme(axis.text.x = element_text(size = 4))  # Ajustar tamaño de las etiquetas del eje x
+
+x8 <- ggplot(imputed_pmm, aes(x = as.factor(social_class))) +
+  geom_bar(fill = "red", color = "black") +
+  labs(title = "Imputed (PMM)",
+       x = "Social Class",
+       y = "Frequency") +
+  theme(axis.text.x = element_text(size = 6))  # Ajustar tamaño de las etiquetas del eje x
+
+x9 <- ggplot(imputed_rf, aes(x = as.factor(social_class))) +
+  geom_bar(fill = "green", color = "black") +
+  labs(title = "Imputed (RF)",
+       x = "Social Class",
+       y = "Frequency") +
+  theme(axis.text.x = element_text(size = 6))  # Ajustar tamaño de las etiquetas del eje x
+
+# Combinar los gráficos en una sola ventana gráfica
+grid.arrange(x7, x8, x9, nrow = 1)
+
+
+```
+
+In this case, we see that both Random Forest and Predictive Mean Matching are imputing very well all the variables in which we have some NA. As a final decision, we will stick with Random Forest as the imputation method, although the results with PMM are practically the same.
+
+NOTE: We decided to name the data imputed with the random forest method as df_clean, because when working simultaneously on the machine learning and regressions part, we have set data = df_clean.
+
+```{r}
+df_clean<- imputed_rf 
+```
+
+## Unsupervised Method
+
+### PCA
+
+In the following we will conduct a Principal Component Analysis (PCA) which can be a powerful technique for reducing the dimensionality of a dataset while retaining as much of the original variability as possible. In the context of assessing the development of countries in their fight against transphobia, PCA could help to identify patterns and correlations between different indicators that may not be apparent at first glance.
+
+The Pca will allow us to answer the following questions.
+
+What is the most developed country at the time to fight to transfobia?
+
+What are the main indicators contributing to the effective fight against transphobia?
+
+Which countries are most important in explaining the variability of the data?
+
+Can we rank the countries considering all the variables at the same time?
+
+To perform PCA we are going to use the following database, which does not contain categorical variables, which is necessary to perform a PCA. We are only left with numerical and binary variables.
+
+```{r}
+set.seed(123)
+df_clean_no_country <- df_clean |> dplyr::select(-isocntry, -age_seq, -age_seq_pca, -countryname, -gov_right1, -gov_cent1, -gov_cent1)
+
+df_clean_no_country <- df_clean_no_country |>
+  select_if(is.numeric)
+
+country = df_clean$countryname
+
+```
+
+In the following code we will perform a clean-up of the data to remove columns containing constant or zero values in the `data_clean` dataset. Then, we apply principal component analysis (PCA) using the `prcomp()` function, standardising the variables to have a unit variance. Finally, we obtain a summary of the PCA results using `summary()`, which provides us with information on the amount of variance explained by each principal component and helps us to interpret the structure and relative importance of the variables in the dataset.
+
+```{r, warning = FALSE}
+set.seed(123)
+pca <- prcomp(df_clean_no_country, scale = TRUE)
+summary(pca)
+```
+
+The summary of the principal component analysis (PCA) indicates that the first principal component (PC1) explains approximately 20,50% of the variability in the data, followed by the second principal component (PC2) which explains about 8.97%. Together, the first 10 principal components explain approximately 70% of the total variability in the data. This suggests that these components capture most of the important information in the data set, while the remaining components contribute a smaller proportion of variability.
+
+We will see better in the following graph:
+
+```{r, warning = FALSE}
+set.seed(123)
+library(factoextra)
+
+fviz_screeplot(pca, addlabels = TRUE)
+```
+
+The first principal component captures the maximum potential variance in the dataset, while each subsequent component captures the remaining variability. By combining the explained variances of the first few principal components, we can get an idea of how much of the total variance is maintained by the modified data. We see that, already with the first component, we are accounting for roughly 20,5% of variability in our data.
+
+The following graph will show the relative importance of each original variable in the first principal component of the principal component analysis (PCA), with higher bars indicating a greater influence on that component.
+
+```{r, warning = FALSE}
+set.seed(123)
+barplot(pca$rotation[,1], las = 2, col = "darkblue", cex.names = 0.5)
+```
+
+We can see that some of the factors that contribute most to the first component are the gdp_percapita in the different countries, the life expectancy or protection of transgender people and the fact that people are from certain countries.
+
+
+The following graph shows the contribution of each original variable to the variance explained by the first principal component of the principal component analysis (PCA), representing the squared charges, which are similar to percentages, but without the sign. These squared charges are called the variables' contribution to the component.
+
+```{r, warning = FALSE}
+set.seed(123)
+fviz_contrib(pca, choice = "var", axes = 1)
+```
+The first principal component appears to be capturing those variables related to socioeconomic and demographic development. 
+
+We repeat the process for PC2. And we compare results.
+
+```{r, warning = FALSE}
+set.seed(123)
+barplot(pca$rotation[,2], las = 2, col = "darkblue", cex.names = 0.5)
+
+fviz_contrib(pca, choice = "var", axes = 2)
+
+```
+The variables with the highest weight in PC2, related to age and discrimination, reflect important aspects of demographic structure and social dynamics. Since the sign is negative, a low score could indicate a more open and equitable society in terms of social relations and human rights.
+
+Let's see a plot by country based on PC1.
+
+```{r, warning = FALSE}
+set.seed(123)
+map <- data.frame(country = country, value = -pca$x[,1])
+
+# Convertir los nombres de países a códigos ISO3
+map$country <- countrycode(map$country, 'country.name', 'iso3c')
+# Unir los datos al mapa usando rworldmap
+matched <- joinCountryData2Map(map, joinCode = "ISO3", nameJoinColumn = "country")
+# Unir los datos al mapa usando rworldmap
+matched <- joinCountryData2Map(map, joinCode = "ISO3", nameJoinColumn = "country")
+
+mapParams <- mapCountryData(matched, nameColumnToPlot = "value",
+                            missingCountryCol = "white", addLegend = TRUE,
+                            borderCol = "#C7D9FF", catMethod = "pretty",
+                            colourPalette = "terrain", mapTitle = "PCA1 by Country",
+                            lwd = 1, xlim = c(-25, 40), ylim = c(34, 70))
+
+```
+We can observe that Spain, Denmark, and the Netherlands are the countries with higher scores in variables related to PC1. 
+
+This suggests:
+-These countries likely exhibit higher levels of socio-economic development and demographic well-being compared to others.
+
+-They might have higher better life expectancy, and more progressive policies regarding social issues.
+
+-It suggests a positive correlation between socio-economic indicators and the overall well-being of a country's population.
+
+Policy-makers could study the practices of these countries to implement similar strategies in less developed regions, aiming to improve overall societal welfare.
+
+On the other hand, Eastern European countries are those with lower levels of development and well-being in Europe.
+
+### Clustering
+
+We then performed a clustering to see how the data was grouped:
+
+```{r, warning = FALSE}
+# Combinar las valoraciones de PC1 y PC2 en un solo data frame
+data <- data.frame(country = country, PC1 = -pca$x[,1], PC2 = -pca$x[,2])
+
+data<- data |>
+  group_by(country) |>
+  summarize_all(mean)
+
+
+
+k <- 4
+
+
+kmeans_result <- kmeans(data[, c("PC1", "PC2")], centers = k)
+
+
+cluster_assignments <- kmeans_result$cluster
+
+plot(data$PC1, data$PC2, col = cluster_assignments, pch = 19, 
+     main = "Clustering of countries in PC1 vs PC2", xlab = "PC1", ylab = "PC2",
+     xlim = c(-4, 4.5), ylim = c(-3, 2))
+
+points(kmeans_result$centers, col = 1:k, pch = 8, cex = 2)
+text(data$PC1, data$PC2, labels = data$country, pos = 4, cex = 0.4)
+legend("topright", legend = paste("Cluster", 1:k), col = 1:k, pch = 8, cex = 0.8)
+
+```
+
+## Classification
+
+The next step in the work is the classification of the model to be used. The first step is to prepare the dataset that we will use in our analysis, in which we add each country as a dummy. 
+
+```{r}
+set.seed(123)
+df_clean <- df_clean |> dplyr::select(-isocntry)
+df_clean_dummies_country <- dummyVars(" ~ .", data = df_clean)
+df_clean_final <- predict(df_clean_dummies_country, newdata = df_clean)
+df_clean_final <- as.data.frame(df_clean_final)
+```
+
+We will be taking as a target variable the question "Do you think that transgender persons should be able to change their civil documents to match their inner gender identity?" included in the Special Eurobaromenter 493: Discrimination in the EU. In our dataset, this variable has the name `trans_document_change`. We have the following Research Question:
+
+Can we predict the attitude of a respondent towards transgender persons being able to change civil documents to match their inner gender identity taking into account their demographic profile, political orientation, level of education, and exposure to diversity?
+
+This question pretends to explore the relation between the acceptance of civil rights for transgender people and personal characteristics and individual experience, as well as other country-level variables. We will employ a classification model to identify patterns that differentiate those who support this kind of policy and administrative process from those who don't.
+
+First, we will separate the data set between train and test.
+
+```{r}
+set.seed(123)
+in_train <- createDataPartition(df_clean_final$trans_document_change, p = 0.8, list = FALSE)  # 80% for training
+training <- df_clean_final[ in_train,]
+testing <- df_clean_final[-in_train,]
+nrow(training)
+nrow(testing)
+```
+
+### Logistic Regression
+
+Firstly, we will employ a logistic regression since we want to classify a binary variable. This method is adequate for our analysis since it allows the estimation of the probability that an individual belongs to one of the two categories (in this case, supporting or not supporting that transgender people can change their civil documents). The logistic regression offers the chance to interpret in a direct way the importance and effect of each independent variable on the target variable.
+
+It is necessary to add that in order to select the variables we have based ourselves on the correlations made in the descriptive analysis to see which are those that most affect our target variables, leaving out those that are not related.
+
+```{r, warning = FALSE}
+set.seed(123)
+logit.model <- glm(
+  trans_document_change ~ age + life_satisfaction + frethnic + frlgtb + frtrans +
+    minority_ethnic + sexorient_discrimination + trans_politician  +
+    gender + protection_trans + life_expectancy + gdp_percapita + population_density +
+    rural_population + fertility_rate + gov_right1 + samesex_marriage_allowed + belief +
+    countrynameBulgaria + countrynameHungary + countrynameRomania +
+    countrynameNetherlands + countrynameSpain,
+  family = binomial(link = 'logit'),
+  data = training
+)
+
+summary(logit.model)
+```
+We can see that most of the variables are highly significant.
+
+Next, we will generate predictions for different values of the explanatory variable using the previously especified logistic regression model. Then, we will visualice these predictions with a graffic. This way we will be able to observe how it influences the probability of the respondent being in favor of transgender people being able to change their civil documentation. This analysis shows the relation between transphobe attitudes and age.
+
+```{r, warning = FALSE}
+set.seed(123)
+gg.pred = ggpredict(logit.model, terms = "age")
+gg.pred
+
+ggplot_object <- plot(gg.pred) + 
+  geom_point(color="blue", size=3) + 
+  geom_line(color="blue") +
+  theme_minimal() +
+  labs(x="Age", y="Predicted Probability", 
+       title="Predicted Probability of Supporting Civil Document Change")
+ggplot_object
+```
+
+In this graph we can observe the evolution of the confidence interval along the age distribution, being the strongest supporters of the measure the younger people, which follows the idea that we could have thought in first place. The older the individual, the less probable it is that they support transgender people changing their civil documents. 
+
+Let's do the same for other variables:
+
+```{r, warning = FALSE}
+set.seed(123)
+gg.pred.gender = ggpredict(logit.model, terms = "gender")
+gg.pred.expect = ggpredict(logit.model, terms = "life_expectancy")
+gg.pred.satis = ggpredict(logit.model, terms = "life_satisfaction")
+gg.pred.density = ggpredict(logit.model, terms = "population_density")
+
+plot(gg.pred.gender)
+plot(gg.pred.expect)
+plot(gg.pred.satis)
+plot(gg.pred.density)
+```
+
+In this case we've measured the relation between the support of changing Civil Documents and Gender. We can see that the respondent being male decreases the probability of supporting the change of documents. We can also observe that the higher the life expectancy on the country is, the strongest support to transgender people changing their civil documents. Another important thing is that in the countries with more population density tend to support more the changing of Civil Document and the same is happening with `life_satisfaction`
+
+To measure the performance of the model, we will use a confusion matrix to compare the predictions with the real values of the variable. Also, we will extract precision and recall metrics to have a better idea of the effectiveness of the model.
+
+```{r, warning = FALSE}
+set.seed(123)
+probability <- predict(logit.model, newdata=testing, type='response')
+prediction <- (ifelse(probability > 0.5, "TRUE", "FALSE"))
+prediction <- ifelse(is.na(probability), "FALSE", prediction)
+
+prediction <- factor(prediction, levels = c("FALSE", "TRUE"))
+
+gg<- factor(ifelse(testing$trans_document_change == 1, "TRUE", "FALSE"), levels = c("FALSE", "TRUE"))
+
+confusionMatrix(prediction, gg)$table
+confusionMatrix(prediction, gg)
+```
+
+This approach allows a detailed evaluation of the behavior of the model, it demonstrates its capacity to correctly classify the respondents based in their individual characteristics and in their countries situation.
+
+The results of the matrix show an Accuracy metric of almost 74%, this means it is able to correctly classify 67% of the individuals of the testing set on the variable that they support or don't support transgender people being able to change their civil documents.
+
+We will now observe whether these results are due to the fact that our target variable is umbalanced, so we are going to show its distribution.
+
+```{r, warning = FALSE}
+set.seed(123)
+table(training$trans_document_change)
+prop.table(table(training$trans_document_change))
+prop.table(table(testing$trans_document_change))
+```
+
+We can observe that it is slightly misaligned, although it is not significant enough to consider that our target variable is umbalanced, although we are going to use other methods that may provide us with a more optimal accurancy and better reflect the results.
+
+### Random Forest
+
+Cuando nos embarcamos en la tarea de crear modelos predictivos para análisis de datos, es crucial explorar diferentes técnicas y algoritmos para encontrar aquel que mejor se adapte a nuestras necesidades específicas. Una de las metodologías más robustas y versátiles en el ámbito del machine learning es el Random Forest, un método de ensemble que construye múltiples árboles de decisión durante el entrenamiento y produce la clase que es la moda de las clasificaciones (para clasificación) o la media de las predicciones (para regresión) de los árboles individuales.
+
+```{r, warning = FALSE}
+set.seed(123)
+training_clean <- na.omit(training)
+testing_clean <- na.omit(testing)
+
+rftrain <- randomForest(trans_document_change ~ age + life_satisfaction + frethnic + frlgtb + frtrans +
+    minority_ethnic + sexorient_discrimination + trans_politician  +
+    gender + protection_trans + life_expectancy + gdp_percapita + population_density +
+    rural_population + fertility_rate + gov_right1 + samesex_marriage_allowed + belief +
+    countrynameBulgaria + countrynameHungary + countrynameRomania +
+    countrynameNetherlands + countrynameSpain, data = training_clean, ntree = 500)
+```
+
+Once the model is generated, we will use the `confusionMatrix` function to generate a confusion matrix, which will provide us with a detailed view of the model's performance, including critical metrics such as Accuracy, Kappa index, Sensitivity, Specificity, and other relevant indicators to assess the quality of the predictions. This analysis will allow us to understand not only how many predictions were correct or incorrect, but also how these hits and misses are distributed, giving us valuable insights into the balance and accuracy of the model in the context of our specific application.
+
+```{r, warning = FALSE}
+set.seed(123)
+probability <- predict(rftrain, newdata = testing_clean)
+prediction <- ifelse(probability > 0.5, "TRUE", "FALSE")
+
+prediction <- factor(prediction, levels = c("FALSE", "TRUE"))
+
+gg<- factor(ifelse(testing_clean$trans_document_change == 1, "TRUE", "FALSE"), levels = c("FALSE", "TRUE"))
+
+confusionMatrix(prediction, gg)
+```
+
+This model shows good performance, standing out for its remarkable accuracy and sensitivity. These metrics indicate that the model is not only effective in correctly classifying observations in general, but also in accurately identifying positive cases. Compared to the model previously considered, the model excels, showing a significant improvement in both overall predictive ability and in the specific ability to detect classes of interest. These results suggest that the Random Forest model is a robust and reliable option for our application, outperforming previous alternatives in critical aspects of performance.
+
+### LDA
+
+To address the research question, we will also implement Linear Discriminant Analysis (LDA) using the MASS library in R. This method allows us not only to classify the observations but also to understand how the different predictor variables contribute to this classification. LDA seeks to maximise the separation between the defined categories of the dependent variable by a linear combination of the predictor variables.
+
+```{r, warning = FALSE}
+set.seed(123)
+lda.model <- lda(trans_document_change ~ age + life_satisfaction + frethnic + frlgtb + frtrans +
+    minority_ethnic + sexorient_discrimination + trans_politician  +
+    gender + protection_trans + life_expectancy + gdp_percapita + population_density +
+    rural_population + fertility_rate + gov_right1 + samesex_marriage_allowed + belief +
+    countrynameBulgaria + countrynameHungary + countrynameRomania +
+    countrynameNetherlands + countrynameSpain, data = training)
+lda.model
+```
+
+After fitting the model, we estimate posterior probabilities for the test dataset. These probabilities, generated by the LDA model, indicate the likelihood of supporting the change of documents for transgender people. Unlike logistic regression, LDA assumes Gaussian distributions for the predictor variables and is particularly useful when the relationships between variables are essentially linear.
+
+```{r, warning = FALSE}
+set.seed(123)
+probability = predict(lda.model, newdata=testing)$posterior
+head(probability)
+```
+
+The results shown correspond to the posterior probabilities generated by a linear classifier, specifically Linear Discriminant Analysis (LDA), to predict whether an individual supports the measure (1) or not (0). The probabilities for class 1 (supporting transgender people receiving appropriate documentation) are consistently high in the first six observations, indicating that the model predicts a high probability that these individuals will support the measure.
+
+```{r, warning = FALSE}
+set.seed(123)
+prediction <- ifelse(probability[,2] > 0.5, "TRUE", "FALSE")
+
+prediction <- factor(prediction, levels = c("FALSE", "TRUE"))
+
+gg<- factor(ifelse(testing$trans_document_change == 1, "TRUE", "FALSE"), levels = c("FALSE", "TRUE"))
+
+confusionMatrix(prediction, gg)
+```
+In this case we can observe an accurancy of 74% with 66% sensitivity. 
+
+### ElasticNet
+
+In this analysis we will use ElasticNet regression, a technique that combines Lasso and Ridge penalties, which is ideal for dealing with data that exhibit high multicollinearity and for performing efficient variable selection. We begin by exploring glmnet's adjustable hyperparameters using the `modelLookup('glmnet')` command, which is essential for understanding how the alpha and lambda parameters work. Alpha helps us balance between Lasso and Ridge, while lambda adjusts the degree of penalty applied, both critical to the fine tuning of our model.
+
+Next, we prepared and cleaned the training and test data sets to avoid any inconsistencies or errors due to missing values. Next, we generate the design matrices for our ElasticNet model, separating the predictor variables (features) from the target (response). This step is critical to ensure that the data is in the proper format before proceeding with model training.
+
+```{r, warning = FALSE}
+set.seed(123)
+modelLookup('glmnet')
+training_clean <- na.omit(training)
+testing_clean <- na.omit(testing)
+
+x_train <- model.matrix(trans_document_change ~ age + life_satisfaction + frethnic + frlgtb + frtrans +
+    minority_ethnic + sexorient_discrimination + trans_politician  +
+    gender + protection_trans + life_expectancy + gdp_percapita + population_density +
+    rural_population + fertility_rate + gov_right1 + samesex_marriage_allowed + belief +
+    countrynameBulgaria + countrynameHungary + countrynameRomania +
+    countrynameNetherlands + countrynameSpain, data=training_clean)[,-1]
+
+y_train <- training_clean$trans_document_change
+
+x_test <- model.matrix(trans_document_change ~ age + life_satisfaction + frethnic + frlgtb + frtrans +
+    minority_ethnic + sexorient_discrimination + trans_politician  +
+    gender + protection_trans + life_expectancy + gdp_percapita + population_density +
+    rural_population + fertility_rate + gov_right1 + samesex_marriage_allowed + belief +
+    countrynameBulgaria + countrynameHungary + countrynameRomania +
+    countrynameNetherlands + countrynameSpain, data=testing_clean)[,-1]
+```
+
+In the next step, we train the ElasticNet model using cross-validation to select the best value of lambda (lambda.min), which minimises the prediction error. The choice of alpha=0.5 gives us a balance between the Lasso and Ridge penalties. We set a seed to guarantee the reproducibility of our results.
+
+```{r, warning = FALSE}
+set.seed(123)
+cv_model <- cv.glmnet(x_train, y_train, alpha=0.5)
+```
+
+Finally, we make predictions on the test set and convert them into class labels, based on a decision threshold of 0.5. We then compare these predicted labels with the actual labels to obtain a confusion matrix, which allows us to evaluate the accuracy and overall performance of the model in an intuitive and effective way.
+
+```{r, warning = FALSE}
+set.seed(123)
+probability <- predict(cv_model, s = "lambda.min", newx = x_test, type = "response")
+
+prediction <- ifelse(probability > 0.5, "TRUE", "FALSE")
+prediction <- factor(prediction, levels = c("FALSE", "TRUE"))
+
+gg <- factor(ifelse(testing_clean$trans_document_change == 1, "TRUE", "FALSE"), levels = c("FALSE", "TRUE"))
+
+confusionMatrix(prediction, gg)
+```
+
+This meticulous process ensures that we apply a rigorous and systematic method to train and evaluate our ElasticNet model, seeking to maximise its predictive ability and practical utility in the context of our data. In terms of results, these are broadly in line with similar methods.
+
+### Gradient Boosting
+
+To apply a Gradient Boosting model in our analysis, we will use the `gbm` package in R, which is specifically designed to optimise boosting models. Gradient Boosting is a machine learning technique for regression and classification problems, which produces a prediction model in the form of an ensemble of weak predictive models, typically decision trees. It is particularly effective because of its ability to handle missing data, exploit the interaction between variables and minimise prediction error through iterative optimisation.
+
+```{r, warning = FALSE}
+set.seed(123)
+training_clean <- na.omit(training)
+testing_clean <- na.omit(testing)
+```
+
+When setting up the model, it is important to carefully select parameters such as the number of trees `n.trees`, the depth of each tree `interaction.depth`, the shrinkage rate `shrinkage`, and the minimum number of observations at the terminal nodes `n.minobsinnode`. These parameters control model complexity, fit and generalisability.
+
+```{r, warning = FALSE}
+
+set.seed(123) # Para reproducibilidad
+gbm_model <- gbm(trans_document_change ~ age + life_satisfaction + frethnic + frlgtb + frtrans +
+    minority_ethnic + sexorient_discrimination + trans_politician  +
+    gender + protection_trans + life_expectancy + gdp_percapita + population_density +
+    rural_population + fertility_rate + gov_right1 + samesex_marriage_allowed + belief +
+    countrynameBulgaria + countrynameHungary + countrynameRomania +
+    countrynameNetherlands + countrynameSpain, data=training_clean, distribution="bernoulli", n.trees=1000, interaction.depth=4, shrinkage=0.01, n.minobsinnode=10, cv.folds=5)
+```
+
+Finally, we evaluate the model on the test set.
+
+```{r, warning = FALSE}
+set.seed(123)
+
+predictions <- predict(gbm_model, testing_clean, n.trees=1000, type="response")
+
+
+predicted_labels <- ifelse(predictions > 0.5, "TRUE", "FALSE")
+predicted_labels <- factor(predicted_labels, levels = c("FALSE", "TRUE"))
+
+actual_labels <- factor(ifelse(testing_clean$trans_document_change == 1, "TRUE", "FALSE"), levels = c("FALSE", "TRUE"))
+
+confusionMatrix(predicted_labels, actual_labels)
+```
+This model shows results that are infinitely superior to previous models.
+
+## Visualization and select
+
+Next, we will evaluate the performance of the classification models we have performed by generating and comparing their ROC Curves and calculating the Area Under the Curve (AUC). This methodology allows us not only to visualise how each model discriminates between classes across different thresholds, but also to summarise their classification ability in a single comparative indicator, the AUC. The importance of using the ROC curve and AUC lies in their ability to provide a clear picture of the balance between model sensitivity and specificity, providing a solid basis for direct comparison between models in terms of their overall classification efficiency.
+
+The AUC emerges as a preferred measure for model selection especially in contexts where classes are unbalanced or when the consequence of false positives differs significantly from that of false negatives. A higher AUC indicates that the model has a greater ability to distinguish between classes accurately, making it valuable for situations where it is crucial to minimise one of these errors. Because the AUC provides an aggregate measure that considers all possible decision thresholds, it facilitates a more holistic assessment of model performance compared to metrics such as accuracy, which can be misleading in unbalanced datasets or when the classification decision requires a careful balance between capturing true positives and avoiding false positives. Therefore, in the search for an optimal model for classification tasks, prioritising AUC as a selection criterion offers a distinct advantage by ensuring a comprehensive assessment of the model's ability to make clear and accurate distinctions between target classes.
+
+
+```{r, warning = FALSE}
+set.seed(123)
+#ROC CURVE RANDOM FOREST
+predictions_rf <- predict(rftrain, newdata=testing_clean, type="response")
+roc_rf <- roc(testing_clean$trans_document_change, predictions_rf)
+plot(roc_rf, col='green', print.thres=TRUE, main="Curva ROC para Random Forest")
+legend("bottomright", legend=c("Random Forest"), col=c("green"), lwd=2)
+abline(a=0, b=1, lty=2, col="gray")
+auc(roc_rf)
+text(0.6, 0.2, paste("AUC =", round(auc(roc_rf), 3)), col="green")
+
+cat("AUC para Random Forest:", roc_rf$auc, "\n")
+```
+
+```{r, warning = FALSE}
+set.seed(123)
+# ROC CURVE LDA 
+probability_lda <- predict(lda.model, newdata=testing)$posterior[,2] 
+roc_lda <- roc(testing$trans_document_change, probability_lda)
+plot(roc_lda, col='pink', print.thres=TRUE, main="Curva ROC para LDA")
+legend("bottomright", legend=c("LDA"), col=c("pink"), lwd=2)
+abline(a=0, b=1, lty=2, col="gray")
+auc(roc_lda)
+text(0.6, 0.2, paste("AUC =", round(auc(roc_lda), 3)), col="pink")
+
+cat("AUC para LDA:", roc_lda$auc, "\n")
+```
+
+```{r, warning = FALSE}
+set.seed(123)
+# ROC CURVE ELASTICNET
+predictions_en <- predict(cv_model, newx=x_test, s="lambda.min", type="response")
+roc_en <- roc(testing_clean$trans_document_change, predictions_en)
+plot(roc_en, col='gold', print.thres=TRUE, main="Curva ROC para Elastic Net")
+legend("bottomright", legend=c("Elastic Net"), col=c("gold"), lwd=2)
+abline(a=0, b=1, lty=2, col="gray")
+auc(roc_en)
+text(0.6, 0.2, paste("AUC =", round(auc(roc_en), 3)), col="gold")
+
+cat("AUC para Elastic Net:", roc_en$auc, "\n")
+```
+
+```{r, warning = FALSE}
+set.seed(123)
+# ROC CURVE GRADIENT BOOSTING
+roc_obj <- roc(response = actual_labels, predictor = predictions, levels = c("FALSE", "TRUE"))
+# Graficar la curva ROC
+plot(roc_obj, main="Curva ROC para el Modelo Gradient Boosting", col="#1c61b6", lwd=2)
+legend("bottomright", legend=c("Gradient Boosting"), col=c("#1c61b6"), lwd=2)
+abline(a=0, b=1, lty=2, col="gray")  
+
+auc(roc_obj)
+text(0.6, 0.2, paste("AUC =", round(auc(roc_obj), 3)), col="#1c61b6")
+print(auc(roc_obj))
+```
+Finally, we opted for the Gradient Boosting model due to its excellent balance between AUC, sensitivity, and precision. Its high AUC demonstrates that it is highly effective at distinguishing between classes, while its sensitivity ensures the accurate detection of true positives. This mix not only guarantees precise classification but also an ideal balance in identifying positive cases and a strong discriminative capacity, making it the ideal model for our use.
+
+## Results
+
+### Result GB
+
+Finally, we interpret the results of our Gradient Boosting model. After preparing and cleaning the data, removing rows with missing values and converting the target variable into a factor, we train our model with a specific set of hyperparameters to predict whether people are for or against changing documents for trans people. We use cross-validation and adjust hyperparameters to optimise performance and minimise overfitting.
+
+In addition, we analyse the importance of the variables to identify which ones contribute most to the model's decisions. This analysis helps us to understand the influence of each characteristic on the prediction of the target variable, providing valuable insights into the factors that affect opinions about changing documents for transgender people.
+
+This approach allows us not only to accurately predict the opinion on document change but also to draw conclusions about the relative importance of the predictor variables, which is essential to understand the underlying dynamics of our observations.
+
+```{r, warning = FALSE}
+set.seed(123)
+training_clean <- na.omit(training)
+testing_clean <- na.omit(testing)
+
+
+training_clean$trans_document_change <- factor(training_clean$trans_document_change, levels = c(0, 1), labels = c("X0", "X1"))
+
+
+control <- trainControl(method = "cv", number = 10, classProbs = TRUE, summaryFunction = twoClassSummary)
+control$verboseIter=F
+
+gbmFit <- train(trans_document_change ~ age + life_satisfaction + frethnic + frlgtb + frtrans +
+    minority_ethnic + sexorient_discrimination + trans_politician  +
+    gender + protection_trans + life_expectancy + gdp_percapita + population_density +
+    rural_population + fertility_rate + gov_right1 + samesex_marriage_allowed + belief +
+    countrynameBulgaria + countrynameHungary + countrynameRomania +
+    countrynameNetherlands + countrynameSpain, 
+                  data = training_clean,
+                  method = "xgbTree",
+                  preProc = c('scale', 'center'),
+                  trControl = control,
+                  tuneGrid = expand.grid(nrounds = c(50), # Menos rondas
+                                         max_depth = c(2,3,4), # Profundidad reducida
+                                         eta = c(0.1,0.1), # Tasa de aprendizaje
+                                         gamma = c(1), # Regularización mínima de pérdida requerida para hacer una partición
+                                         colsample_bytree = c(0.5), # Submuestra de columnas
+                                         min_child_weight = c(1), # Peso mínimo de los hijos
+                                         subsample = c(0.5))) # Submuestra de entrenamiento
+gbmFit
+plot(gbmFit)
+
+
+gbmProb = predict(gbmFit, newdata=testing_clean, type="prob")
+
+prediction <- factor(ifelse(gbmProb[,2] > 0.5, "1", "0"), levels = c("0", "1"))
+KOKO <- factor(testing_clean$trans_document_change, levels = c("0", "1"))
+
+confusionMatrix(prediction, KOKO)$table
+confusionMatrix(prediction, KOKO)$overall[1:2]
+
+plot(varImp(gbmFit, scale = F), scales = list(y = list(cex = .95)))
+```
+The graph shows the importance of the variables in the Gradient Boosting model. Clearly, samesex_marriage_allowed is the most influential variable, indicating that the legalisation of same-sex marriage is a strong predictor in our model. Other significant predictors include frlgtb and protection_trans, suggesting that attitudes towards the LGBT community and trans protection policies are also determinants. Demographic variables such as rural_population and life_expectancy are less important, but still contribute to the model. This analysis of variable importance helps us understand which factors contribute most to the prediction of the target variable and may point to areas for targeted policy or social interventions.
+
+```{r, warning = FALSE}
+library(pdp)
+partial(gbmFit, pred.var = "samesex_marriage_allowed", which.class=2, plot = TRUE, prob=TRUE, rug = TRUE)
+partial(gbmFit, pred.var = "gender", which.class=2, plot = TRUE, prob=TRUE, rug = TRUE)
+partial(gbmFit, pred.var = "age", which.class=2, plot = TRUE, prob=TRUE, rug = TRUE)
+partial(gbmFit, pred.var = "countrynameSpain", which.class=2, plot = TRUE, prob=TRUE, rug = TRUE)
+
+```
+
+For example, we can see that the fact that an individual is Spanish increases the likelihood that he or she will support the change of documents for transgender people.
